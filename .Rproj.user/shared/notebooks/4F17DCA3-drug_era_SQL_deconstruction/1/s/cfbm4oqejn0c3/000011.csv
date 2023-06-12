@@ -1,0 +1,13 @@
+"0","cteSubExposures <- sqldf::sqldf("""
+"0","SELECT "
+"0","  ROW_NUMBER() OVER (PARTITION BY person_id, drug_concept_id, drug_sub_exposure_end_date ORDER BY person_id) as row_number, "
+"0","  person_id, "
+"0","  drug_concept_id,    "
+"0","  MIN(drug_exposure_start_date) AS drug_sub_exposure_start_date, "
+"0","  drug_sub_exposure_end_date, "
+"0","  COUNT(*) AS drug_exposure_count"
+"0","FROM cteDrugExposureEnds"
+"0","GROUP BY person_id, drug_concept_id, drug_sub_exposure_end_date"")"
+"2","tcltk DLL is linked to '/opt/X11/lib/libX11.6.dylib'
+"
+"0","cteSubExposures"

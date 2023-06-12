@@ -1,0 +1,27 @@
+{
+    "id": "764E764B",
+    "path": "~/projects/understanding_cohort_era_logic/era_logic_experiment.R",
+    "project_path": "era_logic_experiment.R",
+    "type": "r_source",
+    "hash": "3246448588",
+    "contents": "",
+    "dirty": false,
+    "created": 1686514248637.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "tempName": "Untitled1",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "177,0",
+        "scrollLine": "154"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1686563570,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1686563570316,
+    "read_only": false,
+    "read_only_alternatives": []
+}

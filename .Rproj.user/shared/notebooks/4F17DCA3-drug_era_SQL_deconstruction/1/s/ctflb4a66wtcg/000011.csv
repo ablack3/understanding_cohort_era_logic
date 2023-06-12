@@ -1,0 +1,13 @@
+"0","cteFinalTarget <- sqldf::sqldf("""
+"0","SELECT "
+"0","  row_number, "
+"0","  person_id, "
+"0","  drug_concept_id as ingredient_concept_id, "
+"0","  drug_sub_exposure_start_date, "
+"0","  drug_sub_exposure_end_date, drug_exposure_count,"
+"0","  drug_sub_exposure_end_date - drug_sub_exposure_start_date AS days_exposed"
+"0","FROM cteSubExposures"
+"0",""")"
+"2","tcltk DLL is linked to '/opt/X11/lib/libX11.6.dylib'
+"
+"0","cteFinalTarget"

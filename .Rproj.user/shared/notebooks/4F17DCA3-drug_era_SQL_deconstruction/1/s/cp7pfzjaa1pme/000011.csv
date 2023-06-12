@@ -1,0 +1,6 @@
+"0","cteEndDates <- sqldf::sqldf("""
+"0","SELECT person_id, ingredient_concept_id, event_date - 30 AS end_date -- unpad the end date"
+"0","FROM cteEndDates"
+"0","WHERE (2 * start_ordinal) - overall_ord = 0"")"
+"2","tcltk DLL is linked to '/opt/X11/lib/libX11.6.dylib'
+"

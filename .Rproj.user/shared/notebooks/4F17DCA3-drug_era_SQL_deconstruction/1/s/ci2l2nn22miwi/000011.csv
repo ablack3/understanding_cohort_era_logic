@@ -1,0 +1,4 @@
+"0","con <- DatabaseConnector::connect(cd)
+"
+"1","Connecting using SQLite driver
+"

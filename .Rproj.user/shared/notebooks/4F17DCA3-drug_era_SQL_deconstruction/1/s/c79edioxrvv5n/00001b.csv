@@ -1,0 +1,7 @@
+"0","drug_exposure <- tribble("
+"0"," ~drug_exposure_id, ~person_id, ~drug_concept_id, ~drug_exposure_start_date, ~drug_exposure_end_date, ~days_supply,"
+"0","  1,                 1,          1127433,           1,                         50,                      NA_real_,"
+"0","  2,                 1,          1127078,          10,                         60,                      NA_real_,"
+"0","  3,                 1,          1127078,          80,                        120,                      NA_real_"
+"0",")"
+"0","drug_exposure"

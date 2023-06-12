@@ -1,0 +1,270 @@
+---
+title: "Drug Era SQL Deconstruction"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+This document will step through the process of creating drug eras and show each intermediate result. The SQL code comes from https://ohdsi.github.io/CommonDataModel/sqlScripts.html and has been slightly modified to accommodate the use of numbers in place of dates.
+
+
+We will use the concept and concept_ancestor tables from Eunomia, a mini CDM database in SQLite that can be easily accessed in R. This CDM is small and the concept and concept_ancestor tables are not complete so it is only suitable for examples.
+
+
+```{r, message=FALSE}
+# Load required packages. These must first be installed. e.g. install.packages("Eunomia")
+library(Eunomia) # mini synthetic CDM from synthea data (https://synthetichealth.github.io/synthea/)
+library(DatabaseConnector) # OHDSI database connection tools and drivers
+library(dplyr) # data manipulation toolset
+
+cd <- getEunomiaConnectionDetails()
+con <- connect(cd)
+concept <- dbGetQuery(con, "select * from concept") %>% tibble()
+concept_ancestor <- dbGetQuery(con, "select * from concept_ancestor") %>% tibble()
+
+# Uncomment the lines below to check out the measurement table from Eunomia 
+# measurement <- dbGetQuery(con, "select * from measurement") %>% tibble()
+# View(measurement)
+
+DatabaseConnector::disconnect(con)
+```
+
+
+First we will create an example drug_exposure table to run through the algorithm. This is the input to the drug era logic so change this if you would like to see how different inputs are handled by the drug era logic.
+```{r}
+drug_exposure <- tribble(
+ ~drug_exposure_id, ~person_id, ~drug_concept_id, ~drug_exposure_start_date, ~drug_exposure_end_date, ~days_supply,
+  1,                 1,          1127433,           1,                         50,                      NA_real_,
+  2,                 1,          1127078,          10,                         60,                      NA_real_,
+  3,                 1,          1127078,          80,                        120,                      NA_real_
+)
+drug_exposure
+```
+
+Look up the drug concepts in the concept table.
+```{r}
+concept %>% filter(CONCEPT_ID %in% drug_exposure$drug_concept_id)
+```
+## Step 1
+
+Roll up drug exposures to the ingredient level and apply some if-else logic to assign a drug exposure end date.
+
+```{r}
+ctePreDrugTarget <- sqldf::sqldf("
+    SELECT
+        d.drug_exposure_id
+        , d.person_id
+        , c.concept_id AS ingredient_concept_id
+        , d.drug_exposure_start_date AS drug_exposure_start_date
+        , d.days_supply AS days_supply
+        , COALESCE(
+            ---NULLIF returns NULL if both values are the same, otherwise it returns the first parameter
+            NULLIF(drug_exposure_end_date, NULL),
+            ---If drug_exposure_end_date != NULL, return drug_exposure_end_date, otherwise go to next case
+            NULLIF(drug_exposure_start_date + days_supply, drug_exposure_start_date),
+            ---If days_supply != NULL or 0, return drug_exposure_start_date + days_supply, otherwise go to next case
+            drug_exposure_start_date + 1
+            ---Add 1 day to the drug_exposure_start_date since there is no end_date or INTERVAL for the days_supply
+        ) AS drug_exposure_end_date
+    FROM drug_exposure d
+        JOIN concept_ancestor ca ON ca.descendant_concept_id = d.drug_concept_id
+        JOIN concept c ON ca.ancestor_concept_id = c.concept_id
+        WHERE c.vocabulary_id = 'RxNorm' ---8 selects RxNorm from the vocabulary_id
+        AND c.concept_class_id = 'Ingredient'
+        AND d.drug_concept_id != 0 ---Our unmapped drug_concept_id's are set to 0, so we don't want different drugs wrapped up in the same era
+        AND coalesce(d.days_supply,0) >= 0 
+")
+
+ctePreDrugTarget %>% arrange(drug_exposure_id)
+```
+
+Check that the ingredient concept id is actually an ingredient.
+
+```{r}
+concept %>% filter(CONCEPT_ID %in% ctePreDrugTarget$ingredient_concept_id)
+```
+
+## Step 2
+
+Pivot the data so that it has one event_date column and an event type column that indicates if the date is a start date or end date. Add two ordering columns: 1) Overall ordering by date 2) cumulative count of start dates ordered by date. Flag rows where the overall ordering is equal to two time the start date ordering.
+
+```{r}
+cteSubExposureEndDates <- sqldf::sqldf("
+      SELECT person_id, ingredient_concept_id, event_date, event_type,
+        MAX(start_ordinal) OVER (PARTITION BY person_id, ingredient_concept_id
+            ORDER BY event_date, event_type ROWS unbounded preceding) AS start_ordinal,
+        -- this pulls the current START down from the prior rows so that the NULLs
+        -- from the END DATES will contain a value we can compare with
+            ROW_NUMBER() OVER (PARTITION BY person_id, ingredient_concept_id
+                ORDER BY event_date, event_type) AS overall_ord
+            -- this re-numbers the inner UNION so all rows are numbered ordered by the event date
+        FROM (
+            -- select the start dates, assigning a row number to each
+            SELECT person_id, ingredient_concept_id, drug_exposure_start_date AS event_date,
+            -1 AS event_type,
+            ROW_NUMBER() OVER (PARTITION BY person_id, ingredient_concept_id
+                ORDER BY drug_exposure_start_date) AS start_ordinal
+            FROM ctePreDrugTarget
+
+            UNION ALL
+
+            SELECT person_id, ingredient_concept_id, drug_exposure_end_date, 1 AS event_type, NULL
+            FROM ctePreDrugTarget
+        )")
+
+cteSubExposureEndDates %>% 
+  mutate(is_valid_end_date = (2 * start_ordinal) - overall_ord == 0)
+```
+
+Keep only rows that correspond to valid end dates.
+
+```{r}
+cteSubExposureEndDates <- sqldf::sqldf("
+  SELECT person_id, ingredient_concept_id, event_date AS end_date
+  FROM cteSubExposureEndDates
+  WHERE (2 * start_ordinal) - overall_ord = 0")
+```
+
+## Step 3
+
+For each person-ingredient-start_date combination find the earliest end date that is after the start date.
+
+```{r}
+cteDrugExposureEnds <- sqldf::sqldf("
+SELECT
+    dt.person_id
+    , dt.ingredient_concept_id as drug_concept_id
+    , dt.drug_exposure_start_date
+    , MIN(e.end_date) AS drug_sub_exposure_end_date
+FROM ctePreDrugTarget dt
+JOIN cteSubExposureEndDates e 
+  ON dt.person_id = e.person_id 
+  AND dt.ingredient_concept_id = e.ingredient_concept_id 
+  AND e.end_date >= dt.drug_exposure_start_date
+GROUP BY
+      dt.drug_exposure_id
+    , dt.person_id
+    , dt.ingredient_concept_id
+    , dt.drug_exposure_start_date
+")
+
+cteDrugExposureEnds
+```
+## Step 4
+
+For each person-ingredient-end_date combination, find the earliest start date.
+
+```{r}
+cteSubExposures <- sqldf::sqldf("
+SELECT 
+  ROW_NUMBER() OVER (PARTITION BY person_id, drug_concept_id, drug_sub_exposure_end_date ORDER BY person_id) as row_number, 
+  person_id, 
+  drug_concept_id,    
+  MIN(drug_exposure_start_date) AS drug_sub_exposure_start_date, 
+  drug_sub_exposure_end_date, 
+  COUNT(*) AS drug_exposure_count
+FROM cteDrugExposureEnds
+GROUP BY person_id, drug_concept_id, drug_sub_exposure_end_date")
+
+cteSubExposures
+```
+## Step 5
+
+Now we have continuous periods of exposure each drug ingredient for each person. Calculate the days of each continuous exposure.
+```{r}
+cteFinalTarget <- sqldf::sqldf("
+SELECT 
+  row_number, 
+  person_id, 
+  drug_concept_id as ingredient_concept_id, 
+  drug_sub_exposure_start_date, 
+  drug_sub_exposure_end_date, drug_exposure_count,
+  drug_sub_exposure_end_date - drug_sub_exposure_start_date AS days_exposed
+FROM cteSubExposures
+")
+cteFinalTarget
+```
+
+## Step 6
+
+Add 30 days to each period end date and repeat collapsing algorithm starting with the pivoting and calculation of cumulative start date count and overall ordering columns.
+
+```{r}
+cteEndDates <- sqldf::sqldf("
+SELECT person_id, ingredient_concept_id, event_date, event_type,
+  MAX(start_ordinal) OVER (PARTITION BY person_id, ingredient_concept_id
+    ORDER BY event_date, event_type ROWS UNBOUNDED PRECEDING) AS start_ordinal,
+  ROW_NUMBER() OVER (PARTITION BY person_id, ingredient_concept_id ORDER BY event_date, event_type) AS overall_ord
+FROM (
+    -- select the start dates, assigning a row number to each
+    SELECT person_id, ingredient_concept_id, drug_sub_exposure_start_date AS event_date,
+    -1 AS event_type,
+    ROW_NUMBER() OVER (PARTITION BY person_id, ingredient_concept_id
+        ORDER BY drug_sub_exposure_start_date) AS start_ordinal
+    FROM cteFinalTarget
+    UNION ALL
+    -- pad the end dates by 30 to allow a grace period for overlapping ranges.
+    SELECT person_id, ingredient_concept_id, drug_sub_exposure_end_date + 30, 1 AS event_type, NULL
+    FROM cteFinalTarget
+)")
+
+cteEndDates %>% 
+  mutate(is_valid_end_date = (2 * start_ordinal) - overall_ord == 0)
+```
+
+Unpad the end dates and keep only valid end dates.
+```{r}
+cteEndDates <- sqldf::sqldf("
+SELECT person_id, ingredient_concept_id, event_date - 30 AS end_date
+FROM cteEndDates
+WHERE (2 * start_ordinal) - overall_ord = 0")
+```
+
+## Step 7
+
+For each person-ingredient-start_date, find the earliest valid end_date that is after the start_date.
+```{r}
+cteDrugEraEnds <- sqldf::sqldf("
+SELECT
+    ft.person_id
+    , ft.ingredient_concept_id as drug_concept_id
+    , ft.drug_sub_exposure_start_date
+    , MIN(e.end_date) AS drug_era_end_date
+    , drug_exposure_count
+    , days_exposed
+FROM cteFinalTarget ft
+JOIN cteEndDates e 
+  ON ft.person_id = e.person_id 
+  AND ft.ingredient_concept_id = e.ingredient_concept_id 
+  AND e.end_date >= ft.drug_sub_exposure_start_date
+GROUP BY
+      ft.person_id
+    , ft.ingredient_concept_id
+    , ft.drug_sub_exposure_start_date
+    , drug_exposure_count
+    , days_exposed")
+
+cteDrugEraEnds
+```
+
+## Step 8
+
+For each person-ingredient-end_date combination find the earliest linked start_date. Calculate the "gap days" as the total duration of the drug era minus the total number of days the person was actually exposed to the drug ingredient according to the data on the drug_exposure records.
+
+```{r}
+sqldf::sqldf(
+"SELECT
+    row_number()over(order by person_id) drug_era_id
+    , person_id
+    , drug_concept_id
+    , MIN(drug_sub_exposure_start_date) AS drug_era_start_date
+    , drug_era_end_date
+    , SUM(drug_exposure_count) AS drug_exposure_count
+    , (drug_era_end_date - MIN(drug_sub_exposure_start_date)) - SUM(days_exposed) as gap_days
+FROM cteDrugEraEnds dee
+GROUP BY person_id, drug_concept_id, drug_era_end_date;")
+```

@@ -1,0 +1,6 @@
+library(SqlRender)
+sql <- readSql("drug_era.sql")
+unique(stringr::str_extract_all(sql, "@\\w+")[[1]])
+sql <- render(sql, cdm_schema = "main")
+sql <- translate(sql, targetDialect = "sqlite")
+writeSql(sql, "drug_era_eunomia.sql")
